@@ -1,5 +1,5 @@
 """
-Global and Shrinking Window training with SiGAT.
+Global and Shrinking Window training with SiGAT (Corrected with Logging).
 """
 import os
 import json
@@ -16,22 +16,27 @@ from data_manager import load_master_data, prepare_data, get_universe_returns
 from graph_builder import build_rolling_graphs, edge_index_from_adjacency
 from sgat_model import SiGAT, ETFRegressor
 from selector import select_top_etf_from_scores
-from us_calendar import next_trading_day
 from push_results import push_daily_result
 
 
 def prepare_graph_data(graphs, train_end_date):
     """Extract graph data up to train_end_date."""
+    if not graphs:
+        print("  No graphs available.")
+        return None, None, None
     train_graphs = [g for g in graphs if g[0] <= train_end_date]
     if not train_graphs:
-        return None
+        print(f"  No graph found on or before {train_end_date}. Earliest graph date: {graphs[0][0]}")
+        return None, None, None
     last_date, adj, tickers = train_graphs[-1]
+    print(f"  Using graph from {last_date} with shape {adj.shape}")
     return last_date, adj, tickers
 
 
 def train_model(model, regressor, node_features, pos_edge_index, neg_edge_index,
                 y_train, y_val, epochs, lr, patience, device):
-    """Train the GNN + regressor to predict next-day return ranking."""
+    """Train the GNN + regressor with logging."""
+    print(f"  Training on device: {device}")
     optimizer = optim.Adam(list(model.parameters()) + list(regressor.parameters()), lr=lr)
     criterion = nn.MSELoss()
 
@@ -55,12 +60,14 @@ def train_model(model, regressor, node_features, pos_edge_index, neg_edge_index,
         loss.backward()
         optimizer.step()
 
-        # Validation
         model.eval()
         regressor.eval()
         with torch.no_grad():
             val_pred = regressor(model(x, pos_edge_index, neg_edge_index))
             val_loss = criterion(val_pred, y_val)
+
+        if epoch % 20 == 0:
+            print(f"    Epoch {epoch:3d} | Train Loss: {loss.item():.6f} | Val Loss: {val_loss.item():.6f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -72,6 +79,7 @@ def train_model(model, regressor, node_features, pos_edge_index, neg_edge_index,
         else:
             patience_counter += 1
             if patience_counter >= patience:
+                print(f"    Early stopping at epoch {epoch}")
                 break
 
     model.load_state_dict(best_state['model'])
@@ -110,6 +118,7 @@ def evaluate_etf(ticker: str, returns: pd.DataFrame) -> dict:
 
 def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     """Global training (80/10/10 split)."""
+    print(f"\n--- Global Training: {universe} ---")
     total_days = len(returns)
     train_end_idx = int(total_days * config.TRAIN_RATIO)
     val_end_idx = train_end_idx + int(total_days * config.VAL_RATIO)
@@ -118,24 +127,27 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     val_ret = returns.iloc[train_end_idx:val_end_idx]
     test_ret = returns.iloc[val_end_idx:]
 
+    print(f"  Data split: train={train_ret.index[0].date()} to {train_ret.index[-1].date()}, "
+          f"val={val_ret.index[0].date()} to {val_ret.index[-1].date()}, "
+          f"test={test_ret.index[0].date()} to {test_ret.index[-1].date()}")
+
     train_end_date = train_ret.index[-1]
-    # Use the most recent graph up to train_end_date
     last_date, adj, tickers = prepare_graph_data(graphs, train_end_date)
     if adj is None:
+        print("  Skipping global training due to missing graph.")
         return {"ticker": None, "metrics": {}, "test_start": "", "test_end": ""}
 
-    # Prepare features: use lagged returns (1 day) as node features
-    # For simplicity, we use the last day's returns as node features.
-    # In a full implementation, you could use more sophisticated features.
+    # Node features: use recent returns (last LOOKBACK_WINDOW days)
+    recent_returns = train_ret.iloc[-config.LOOKBACK_WINDOW:]
+    node_feats = recent_returns.T.values  # shape: (n_assets, lookback)
     scaler = StandardScaler()
-    node_feats = scaler.fit_transform(train_ret.iloc[-config.LOOKBACK_WINDOW:].T.values)
+    node_feats = scaler.fit_transform(node_feats)
     node_feats = torch.tensor(node_feats, dtype=torch.float)
 
-    # Targets: average next-day return during training period (or ranking)
-    # We'll use average forward return as target for regression.
-    y_all = train_ret.shift(-1).mean().values  # crude but works
+    # Targets: average forward return during training (simple proxy)
+    y_all = train_ret.shift(-1).mean().values
     y_train = torch.tensor(y_all, dtype=torch.float)
-    y_val = torch.tensor(val_ret.mean().values, dtype=torch.float)  # placeholder
+    y_val = torch.tensor(val_ret.mean().values, dtype=torch.float)
 
     # Build edge indices
     pos_mask = adj > 0
@@ -144,6 +156,8 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     neg_adj = -adj * neg_mask
     pos_edge_index, _ = edge_index_from_adjacency(pos_adj)
     neg_edge_index, _ = edge_index_from_adjacency(neg_adj)
+
+    print(f"  Positive edges: {pos_edge_index.shape[1]}, Negative edges: {neg_edge_index.shape[1]}")
 
     in_channels = node_feats.shape[1]
     model = SiGAT(in_channels, config.HIDDEN_CHANNELS, config.HIDDEN_CHANNELS,
@@ -155,26 +169,29 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
         y_train, y_val, config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE
     )
 
-    # Predict on test graph (use last graph before test)
+    # Predict on test graph
     test_graphs = [g for g in graphs if g[0] <= test_ret.index[0]]
     if not test_graphs:
-        top_etf = tickers[0]
+        print("  No test graph available; using last training graph.")
+        test_adj = adj
     else:
         _, test_adj, _ = test_graphs[-1]
-        pos_mask_t = test_adj > 0
-        neg_mask_t = test_adj < 0
-        pos_adj_t = test_adj * pos_mask_t
-        neg_adj_t = -test_adj * neg_mask_t
-        pos_edge_idx_t, _ = edge_index_from_adjacency(pos_adj_t)
-        neg_edge_idx_t, _ = edge_index_from_adjacency(neg_adj_t)
 
-        model.eval()
-        regressor.eval()
-        with torch.no_grad():
-            embeddings = model(node_feats, pos_edge_idx_t, neg_edge_idx_t)
-            scores = regressor(embeddings).numpy()
-        top_idx = np.argmax(scores)
-        top_etf = tickers[top_idx]
+    pos_mask_t = test_adj > 0
+    neg_mask_t = test_adj < 0
+    pos_adj_t = test_adj * pos_mask_t
+    neg_adj_t = -test_adj * neg_mask_t
+    pos_edge_idx_t, _ = edge_index_from_adjacency(pos_adj_t)
+    neg_edge_idx_t, _ = edge_index_from_adjacency(neg_adj_t)
+
+    model.eval()
+    regressor.eval()
+    with torch.no_grad():
+        embeddings = model(node_feats, pos_edge_idx_t, neg_edge_idx_t)
+        scores = regressor(embeddings).numpy()
+    top_idx = np.argmax(scores)
+    top_etf = tickers[top_idx]
+    print(f"  Selected ETF: {top_etf}")
 
     metrics = evaluate_etf(top_etf, test_ret)
     return {
@@ -187,6 +204,7 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
 
 def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     """Shrinking window training."""
+    print(f"\n--- Shrinking Window: {universe} ---")
     results = []
     tickers = [col.replace("_ret", "") for col in returns.columns]
 
@@ -194,6 +212,7 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
         start_date = f"{start_year}-01-01"
         mask = returns.index >= start_date
         if mask.sum() < config.MIN_TRAIN_DAYS:
+            print(f"  Window {start_year}: insufficient data ({mask.sum()} days)")
             continue
         window_ret = returns.loc[mask]
         total_days = len(window_ret)
@@ -205,15 +224,20 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
         test_ret = window_ret.iloc[val_end_idx:]
 
         if len(val_ret) < 20 or len(test_ret) < 20:
+            print(f"  Window {start_year}: val/test too short")
             continue
+
+        print(f"  Window {start_year}: train {train_ret.index[0].date()} to {train_ret.index[-1].date()}")
 
         train_end_date = train_ret.index[-1]
         last_date, adj, _ = prepare_graph_data(graphs, train_end_date)
         if adj is None:
             continue
 
+        recent_returns = train_ret.iloc[-config.LOOKBACK_WINDOW:]
+        node_feats = recent_returns.T.values
         scaler = StandardScaler()
-        node_feats = scaler.fit_transform(train_ret.iloc[-config.LOOKBACK_WINDOW:].T.values)
+        node_feats = scaler.fit_transform(node_feats)
         node_feats = torch.tensor(node_feats, dtype=torch.float)
 
         y_train = torch.tensor(train_ret.shift(-1).mean().values, dtype=torch.float)
@@ -236,28 +260,25 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
             y_train, y_val, config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE
         )
 
-        # Predict on test graph
         test_graphs = [g for g in graphs if g[0] <= test_ret.index[0]]
-        if not test_graphs:
-            top_etf = tickers[0]
-        else:
-            _, test_adj, _ = test_graphs[-1]
-            pos_mask_t = test_adj > 0
-            neg_mask_t = test_adj < 0
-            pos_adj_t = test_adj * pos_mask_t
-            neg_adj_t = -test_adj * neg_mask_t
-            pos_edge_idx_t, _ = edge_index_from_adjacency(pos_adj_t)
-            neg_edge_idx_t, _ = edge_index_from_adjacency(neg_adj_t)
+        test_adj = adj if not test_graphs else test_graphs[-1][1]
+        pos_mask_t = test_adj > 0
+        neg_mask_t = test_adj < 0
+        pos_adj_t = test_adj * pos_mask_t
+        neg_adj_t = -test_adj * neg_mask_t
+        pos_edge_idx_t, _ = edge_index_from_adjacency(pos_adj_t)
+        neg_edge_idx_t, _ = edge_index_from_adjacency(neg_adj_t)
 
-            model.eval()
-            regressor.eval()
-            with torch.no_grad():
-                embeddings = model(node_feats, pos_edge_idx_t, neg_edge_idx_t)
-                scores = regressor(embeddings).numpy()
-            top_idx = np.argmax(scores)
-            top_etf = tickers[top_idx]
+        model.eval()
+        regressor.eval()
+        with torch.no_grad():
+            embeddings = model(node_feats, pos_edge_idx_t, neg_edge_idx_t)
+            scores = regressor(embeddings).numpy()
+        top_idx = np.argmax(scores)
+        top_etf = tickers[top_idx]
 
         metrics = evaluate_etf(top_etf, test_ret)
+        print(f"    -> Selected {top_etf}, Ann Return: {metrics.get('ann_return', 0)*100:.1f}%")
         results.append({
             "window_start": start_date,
             "train_end": train_ret.index[-1].strftime("%Y-%m-%d"),
@@ -269,9 +290,11 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
         })
 
     if not results:
+        print("  No shrinking window results produced.")
         return {"ticker": None, "windows": []}
 
     weighted_pick = aggregate_windows(results)
+    print(f"  Weighted ensemble pick: {weighted_pick}")
     return {"ticker": weighted_pick, "windows": results}
 
 
@@ -305,18 +328,24 @@ def run_training():
 
     all_results = {}
     for universe in ["fi", "equity", "combined"]:
-        print(f"Processing {universe} universe...")
+        print(f"\n{'='*50}\nProcessing {universe.upper()} universe\n{'='*50}")
         returns = get_universe_returns(df, universe)
         if returns.empty:
+            print(f"  No returns data for {universe}, skipping.")
             continue
-        # Build graphs from full returns (for global and shrinking)
+
+        print(f"  Building rolling graphs (lookback={config.LOOKBACK_WINDOW}, freq={config.REBALANCE_FREQ})...")
         graphs = build_rolling_graphs(returns)
+        print(f"  Built {len(graphs)} graphs.")
+
         global_res = train_global(universe, returns, graphs)
         shrinking_res = train_shrinking_window(universe, returns, graphs)
+
         all_results[universe] = {
             "global": global_res,
             "shrinking": shrinking_res,
         }
+
     return all_results
 
 
