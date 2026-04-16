@@ -54,8 +54,8 @@ st.markdown(
         letter-spacing: -0.02em;
         color: #111827;
     }
-    .conviction {
-        font-size: 1.2rem;
+    .pred-return {
+        font-size: 1.4rem;
         color: #059669;
         font-weight: 500;
         margin: 0.3rem 0 0.5rem 0;
@@ -209,6 +209,7 @@ def display_global_card(universe_data: dict):
         return
 
     ticker = global_data["ticker"]
+    pred_return = global_data.get("pred_return")
     metrics = global_data.get("metrics", {})
     test_start = global_data.get("test_start", "")
     test_end = global_data.get("test_end", "")
@@ -221,12 +222,14 @@ def display_global_card(universe_data: dict):
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown(f'<div class="ticker-large">{ticker}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="conviction">100.0% conviction</div>', unsafe_allow_html=True)
+        if pred_return is not None:
+            pred_str = f"{pred_return*100:.2f}%"
+            st.markdown(f'<div class="pred-return">Predicted Return: {pred_str}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="meta-text">Signal for {next_day.strftime("%Y-%m-%d")} · Generated {gen_time}</div>', unsafe_allow_html=True)
         st.markdown('<div class="source-badge">Source: Global Training</div>', unsafe_allow_html=True)
     with col2:
-        st.markdown('<div class="meta-text">2nd: — 0.0%</div>', unsafe_allow_html=True)
-        st.markdown('<div class="meta-text">3rd: — 0.0%</div>', unsafe_allow_html=True)
+        # No 2nd/3rd placeholders
+        pass
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -245,6 +248,7 @@ def display_shrinking_card(universe_data: dict, universe_name: str):
         return
 
     ticker = shrinking_data["ticker"]
+    pred_return = shrinking_data.get("pred_return")
     windows = shrinking_data.get("windows", [])
 
     next_day = next_trading_day(datetime.utcnow())
@@ -255,12 +259,14 @@ def display_shrinking_card(universe_data: dict, universe_name: str):
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown(f'<div class="ticker-large">{ticker}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="conviction">100.0% conviction</div>', unsafe_allow_html=True)
+        if pred_return is not None:
+            pred_str = f"{pred_return*100:.2f}%"
+            st.markdown(f'<div class="pred-return">Predicted Return: {pred_str}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="meta-text">Signal for {next_day.strftime("%Y-%m-%d")} · Generated {gen_time}</div>', unsafe_allow_html=True)
         st.markdown('<div class="source-badge">Source: Shrinking Window</div>', unsafe_allow_html=True)
     with col2:
-        st.markdown('<div class="meta-text">2nd: — 0.0%</div>', unsafe_allow_html=True)
-        st.markdown('<div class="meta-text">3rd: — 0.0%</div>', unsafe_allow_html=True)
+        # No 2nd/3rd placeholders
+        pass
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
