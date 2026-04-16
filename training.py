@@ -135,7 +135,7 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     last_date, adj, tickers = prepare_graph_data(graphs, train_end_date)
     if adj is None:
         print("  Skipping global training due to missing graph.")
-        return {"ticker": None, "metrics": {}, "test_start": "", "test_end": ""}
+        return {"ticker": None, "metrics": {}, "test_start": "", "test_end": "", "pred_return": None}
 
     # Node features: use recent returns (last LOOKBACK_WINDOW days)
     recent_returns = train_ret.iloc[-config.LOOKBACK_WINDOW:]
@@ -191,11 +191,13 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
         scores = regressor(embeddings).numpy()
     top_idx = np.argmax(scores)
     top_etf = tickers[top_idx]
-    print(f"  Selected ETF: {top_etf}")
+    pred_return = float(scores[top_idx])
+    print(f"  Selected ETF: {top_etf}, Predicted Return: {pred_return*100:.2f}%")
 
     metrics = evaluate_etf(top_etf, test_ret)
     return {
         "ticker": top_etf,
+        "pred_return": pred_return,
         "metrics": metrics,
         "test_start": test_ret.index[0].strftime("%Y-%m-%d"),
         "test_end": test_ret.index[-1].strftime("%Y-%m-%d"),
@@ -276,9 +278,10 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
             scores = regressor(embeddings).numpy()
         top_idx = np.argmax(scores)
         top_etf = tickers[top_idx]
+        pred_return = float(scores[top_idx])
 
         metrics = evaluate_etf(top_etf, test_ret)
-        print(f"    -> Selected {top_etf}, Ann Return: {metrics.get('ann_return', 0)*100:.1f}%")
+        print(f"    -> Selected {top_etf}, Ann Return: {metrics.get('ann_return', 0)*100:.1f}%, Predicted Return: {pred_return*100:.2f}%")
         results.append({
             "window_start": start_date,
             "train_end": train_ret.index[-1].strftime("%Y-%m-%d"),
@@ -286,16 +289,19 @@ def train_shrinking_window(universe: str, returns: pd.DataFrame, graphs: list) -
             "test_start": test_ret.index[0].strftime("%Y-%m-%d"),
             "test_end": test_ret.index[-1].strftime("%Y-%m-%d"),
             "ticker": top_etf,
+            "pred_return": pred_return,
             "metrics": metrics,
         })
 
     if not results:
         print("  No shrinking window results produced.")
-        return {"ticker": None, "windows": []}
+        return {"ticker": None, "windows": [], "pred_return": None}
 
     weighted_pick = aggregate_windows(results)
-    print(f"  Weighted ensemble pick: {weighted_pick}")
-    return {"ticker": weighted_pick, "windows": results}
+    # Get predicted return for the weighted pick (use the first window's pred_return as fallback)
+    pred_for_pick = next((w["pred_return"] for w in results if w["ticker"] == weighted_pick), None)
+    print(f"  Weighted ensemble pick: {weighted_pick}, Predicted Return: {pred_for_pick*100:.2f}%" if pred_for_pick else f"  Weighted ensemble pick: {weighted_pick}")
+    return {"ticker": weighted_pick, "pred_return": pred_for_pick, "windows": results}
 
 
 def aggregate_windows(windows: list) -> str:
