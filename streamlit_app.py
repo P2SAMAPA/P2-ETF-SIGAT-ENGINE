@@ -105,7 +105,7 @@ st.markdown(
 )
 
 # ---------- Header ----------
-st.markdown('<div class="main-header">SAMBA — Signed Graph Attention ETF Engine</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">SIGAT — Signed Graph Attention ETF Engine</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-header">SGCN · SiGAT · Adversarial Relationships · Cross‑Universe Signals</div>',
     unsafe_allow_html=True,
